@@ -1,0 +1,1347 @@
+name: Build SocialBoost EXE
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Escribir código fuente
+        shell: bash
+        run: |
+          cat > app.py << 'PYEOF'
+          #!/usr/bin/env python3
+          # -*- coding: utf-8 -*-
+          # SocialBoost - Automatizacion de crecimiento organico (TikTok / Instagram)
+
+          import os
+          import re
+          import csv
+          import json
+          import time
+          import random
+          import queue
+          import secrets
+          import string
+          import threading
+          import traceback
+          import urllib.request
+          from datetime import datetime
+
+          import tkinter as tk
+          from tkinter import ttk, messagebox
+          from tkinter.scrolledtext import ScrolledText
+
+          from selenium import webdriver
+          from selenium.webdriver.common.by import By
+          from selenium.webdriver.support.ui import WebDriverWait, Select
+          from selenium.common.exceptions import (
+              WebDriverException,
+              StaleElementReferenceException,
+              ElementClickInterceptedException,
+          )
+
+          APP_NAME = "SocialBoost"
+          BASE_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), APP_NAME)
+          PROFILE_DIR = os.path.join(BASE_DIR, "profiles")
+          CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+          OUT_DIR = os.path.join(BASE_DIR, "salida")
+          os.makedirs(PROFILE_DIR, exist_ok=True)
+          os.makedirs(OUT_DIR, exist_ok=True)
+
+          LOGIN_URL = {
+              "tiktok": "https://www.tiktok.com/login",
+              "instagram": "https://www.instagram.com/accounts/login/",
+          }
+          SIGNUP_URL = {
+              "tiktok": "https://www.tiktok.com/signup/phone-or-email/email",
+              "instagram": "https://www.instagram.com/accounts/emailsignup/",
+          }
+
+          FOLLOW_WORDS = ("follow", "seguir")
+          FOLLOWING_WORDS = ("following", "siguiendo", "friends", "amigos")
+          UNFOLLOW_WORDS = ("unfollow", "dejar de seguir")
+          NEXT_WORDS = ("next", "siguiente", "continue", "continuar",
+                        "sign up", "registrarte", "crear cuenta", "submit")
+
+          DEFAULT_CFG = {
+              "delay_min": 4.0, "delay_max": 11.0, "max_follows": 150,
+              "break_every": 25, "break_seconds": 120,
+              "do_like": True, "headless": False,
+              "u_delay_min": 5.0, "u_delay_max": 13.0, "u_max": 100,
+              "nonmutual_only": True, "cantidad": 5,
+          }
+
+          NOMBRES = ["ana", "lucia", "marta", "sofia", "carla", "elena", "paula", "irene",
+                     "nuria", "clara", "sara", "alba", "laura", "andrea", "rocio", "miriam"]
+          APELLIDOS = ["garcia", "lopez", "martin", "sanchez", "ruiz", "torres", "navarro",
+                       "gil", "vidal", "serrano", "molina", "ortega", "delgado", "castro"]
+
+
+          # ------------------------------------------------------------------ config
+          def load_cfg():
+              cfg = dict(DEFAULT_CFG)
+              try:
+                  with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                      cfg.update(json.load(f))
+              except Exception:
+                  pass
+              return cfg
+
+
+          def save_cfg(cfg):
+              try:
+                  with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                      json.dump(cfg, f, indent=2)
+              except Exception:
+                  pass
+
+
+          # ------------------------------------------------------------------ helpers
+          def human(a, b):
+              time.sleep(random.uniform(a, b))
+
+
+          def new_driver(platform, headless):
+              opts = webdriver.ChromeOptions()
+              prof = os.path.join(PROFILE_DIR, platform + ("_signup" if headless == "signup" else ""))
+              os.makedirs(prof, exist_ok=True)
+              opts.add_argument("--user-data-dir=" + prof)
+              opts.add_argument("--no-first-run")
+              opts.add_argument("--no-default-browser-check")
+              opts.add_argument("--disable-notifications")
+              opts.add_argument("--disable-blink-features=AutomationControlled")
+              opts.add_argument("--lang=es-ES")
+              opts.add_argument("--window-size=1300,950")
+              opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+              opts.add_experimental_option("useAutomationExtension", False)
+              if headless is True:
+                  opts.add_argument("--headless=new")
+              drv = webdriver.Chrome(options=opts)
+              try:
+                  drv.execute_cdp_cmd(
+                      "Page.addScriptToEvaluateOnNewDocument",
+                      {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"})
+              except WebDriverException:
+                  pass
+              return drv
+
+
+          def wait_doc(drv, timeout=25):
+              try:
+                  WebDriverWait(drv, timeout).until(
+                      lambda d: d.execute_script("return document.readyState") == "complete")
+              except Exception:
+                  pass
+              human(1.0, 2.0)
+
+
+          def click_el(drv, el):
+              try:
+                  drv.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+                  human(0.15, 0.45)
+                  try:
+                      el.click()
+                  except (ElementClickInterceptedException, WebDriverException):
+                      drv.execute_script("arguments[0].click();", el)
+                  return True
+              except WebDriverException:
+                  return False
+
+
+          def click_text(drv, words, scope=None, timeout=4):
+              scope = scope or drv
+              end = time.time() + timeout
+              while time.time() < end:
+                  for w in words:
+                      xp = (".//*[self::button or @role='button']"
+                            "[translate(normalize-space(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ',"
+                            "'abcdefghijklmnopqrstuvwxyz')='%s']" % w)
+                      try:
+                          for el in scope.find_elements(By.XPATH, xp):
+                              if el.is_displayed() and click_el(drv, el):
+                                  return True
+                      except WebDriverException:
+                          pass
+                  time.sleep(0.35)
+              return False
+
+
+          def try_fill(drv, xpaths, value, log, label):
+              for xp in xpaths:
+                  try:
+                      els = drv.find_elements(By.XPATH, xp)
+                  except WebDriverException:
+                      continue
+                  for el in els:
+                      try:
+                          if el.is_displayed():
+                              el.clear()
+                              human(0.08, 0.2)
+                              el.send_keys(str(value))
+                              return True
+                      except WebDriverException:
+                          continue
+              log("   ! No se pudo rellenar: " + label)
+              return False
+
+
+          def try_select(drv, xpaths, value, log, label):
+              for xp in xpaths:
+                  try:
+                      els = drv.find_elements(By.XPATH, xp)
+                  except WebDriverException:
+                      continue
+                  for el in els:
+                      try:
+                          Select(el).select_by_value(str(value))
+                          return True
+                      except Exception:
+                          try:
+                              Select(el).select_by_index(int(value))
+                              return True
+                          except Exception:
+                              continue
+              log("   ! No se pudo seleccionar: " + label)
+              return False
+
+
+          def scroll_page(drv, times=3):
+              for _ in range(times):
+                  drv.execute_script("window.scrollBy(0, arguments[0]);", random.randint(350, 950))
+                  human(0.6, 1.6)
+
+
+          def row_username(drv, btn):
+              try:
+                  href = drv.execute_script(
+                      "var b=arguments[0], r=b.closest('div');"
+                      "for(var i=0;i<9&&r;i++){var a=r.querySelector(\"a[href^='/']\");"
+                      "if(a) return a.getAttribute('href'); r=r.parentElement;}"
+                      "return null;", btn)
+              except WebDriverException:
+                  return None
+              if not href:
+                  return None
+              return href.strip("/").split("/")[0].split("?")[0].lower()
+
+
+          # ------------------------------------------------------------------ mail temporal
+          class TempMail:
+              BASE = "https://api.mail.tm"
+
+              def __init__(self):
+                  self.token = None
+                  self.address = None
+                  self.pwd = None
+
+              def _req(self, path, data=None, auth=True):
+                  url = self.BASE + path
+                  body = json.dumps(data).encode() if data is not None else None
+                  req = urllib.request.Request(url, data=body,
+                                               method="POST" if data is not None else "GET")
+                  req.add_header("Content-Type", "application/json")
+                  req.add_header("Accept", "application/json")
+                  if auth and self.token:
+                      req.add_header("Authorization", "Bearer " + self.token)
+                  with urllib.request.urlopen(req, timeout=25) as r:
+                      raw = r.read().decode("utf-8", "replace")
+                  return json.loads(raw) if raw.strip() else {}
+
+              def create(self):
+                  doms = self._req("/domains")["hydra:member"]
+                  dom = doms[0]["domain"]
+                  self.address = "u" + secrets.token_hex(6) + "@" + dom
+                  self.pwd = secrets.token_urlsafe(14)
+                  self._req("/accounts", {"address": self.address, "password": self.pwd})
+                  self.token = self._req("/token",
+                                         {"address": self.address, "password": self.pwd})["token"]
+                  return self.address
+
+              def codigo(self, timeout=200):
+                  fin = time.time() + timeout
+                  while time.time() < fin:
+                      try:
+                          msgs = self._req("/messages")["hydra:member"]
+                      except Exception:
+                          msgs = []
+                      for m in msgs:
+                          try:
+                              full = self._req("/messages/" + m["id"])
+                          except Exception:
+                              continue
+                          txt = full.get("subject", "") or ""
+                          for part in full.get("text", []) or []:
+                              if isinstance(part, str):
+                                  txt += " " + part
+                          for part in full.get("html", []) or []:
+                              if isinstance(part, str):
+                                  txt += " " + re.sub(r"<[^>]+>", " ", part)
+                          m6 = re.findall(r"\b(\d{6,8})\b", txt)
+                          if m6:
+                              return m6[0]
+                      time.sleep(4)
+                  return None
+
+
+          # ------------------------------------------------------------------ identidades
+          def nueva_identidad(edad_min=19, edad_max=38):
+              anio = datetime.now().year - random.randint(edad_min, edad_max)
+              nombre = random.choice(NOMBRES) + " " + random.choice(APELLIDOS).capitalize()
+              usuario = (nombre.split()[0] + random.choice(APELLIDOS) +
+                         str(random.randint(100, 9999)))
+              alfabeto = string.ascii_letters + string.digits
+              pwd = (random.choice(string.ascii_uppercase) + random.choice(string.ascii_lowercase) +
+                     random.choice(string.digits) +
+                     "".join(secrets.choice(alfabeto) for _ in range(9)) + "!")
+              return {
+                  "nombre": nombre,
+                  "usuario": usuario.lower()[:24],
+                  "password": pwd,
+                  "day": str(random.randint(1, 28)),
+                  "month": str(random.randint(1, 12)),
+                  "year": str(anio),
+              }
+
+
+          # ------------------------------------------------------------------ tiktok
+          def tt_collect_links(drv, tag, want, log):
+              drv.get("https://www.tiktok.com/tag/" + tag)
+              wait_doc(drv)
+              seen, links = set(), []
+              for _ in range(14):
+                  try:
+                      anchors = drv.find_elements(By.XPATH, "//a[contains(@href,'/video/')]")
+                  except WebDriverException:
+                      break
+                  for a in anchors:
+                      try:
+                          href = a.get_attribute("href")
+                      except StaleElementReferenceException:
+                          continue
+                      if href and href not in seen:
+                          seen.add(href)
+                          links.append(href)
+                  if len(links) >= want:
+                      break
+                  scroll_page(drv, 2)
+              log("   -> %d videos recolectados en #%s" % (len(links), tag))
+              return links[:want]
+
+
+          def tt_follow(drv):
+              xps = ["//button[@data-e2e='follow-button']",
+                     "//button[normalize-space()='Seguir' or normalize-space()='Follow']"]
+              for xp in xps:
+                  try:
+                      btns = drv.find_elements(By.XPATH, xp)
+                  except WebDriverException:
+                      continue
+                  for b in btns:
+                      try:
+                          if not b.is_displayed():
+                              continue
+                          txt = (b.text or "").strip().lower()
+                          if txt in FOLLOWING_WORDS:
+                              return "already"
+                          if txt in FOLLOW_WORDS and click_el(drv, b):
+                              return "followed"
+                      except StaleElementReferenceException:
+                          continue
+              return "none"
+
+
+          def tt_like(drv):
+              try:
+                  for b in drv.find_elements(By.XPATH, "//button[@data-e2e='like-button']"):
+                      if b.is_displayed():
+                          if b.get_attribute("aria-pressed") != "true":
+                              click_el(drv, b)
+                          return
+              except WebDriverException:
+                  pass
+
+
+          def tt_open_following(drv, username, log):
+              drv.get("https://www.tiktok.com/@" + username)
+              wait_doc(drv)
+              for xp in ["//*[@data-e2e='following-count']",
+                         "//strong[contains(.,'Following') or contains(.,'Siguiendo')]"]:
+                  try:
+                      els = drv.find_elements(By.XPATH, xp)
+                  except WebDriverException:
+                      els = []
+                  for e in els:
+                      if e.is_displayed():
+                          click_el(drv, e)
+                          human(2.5, 4.0)
+                          for sx in ["//div[@role='dialog']", "//*[@data-e2e='following-list']"]:
+                              try:
+                                  sc = drv.find_elements(By.XPATH, sx)
+                              except WebDriverException:
+                                  sc = []
+                              for s in sc:
+                                  if s.is_displayed():
+                                      return s
+                          return drv
+              log("   ! No se pudo abrir la lista de seguidos")
+              return None
+
+
+          def tt_unfollow_here(drv):
+              for xp in ["//button[@data-e2e='follow-button']",
+                         "//button[normalize-space()='Siguiendo' or normalize-space()='Following'"
+                         " or normalize-space()='Amigos' or normalize-space()='Friends']"]:
+                  try:
+                      btns = drv.find_elements(By.XPATH, xp)
+                  except WebDriverException:
+                      continue
+                  for b in btns:
+                      try:
+                          if not b.is_displayed():
+                              continue
+                          if (b.text or "").strip().lower() in FOLLOWING_WORDS:
+                              click_el(drv, b)
+                              human(0.7, 1.4)
+                              click_text(drv, UNFOLLOW_WORDS, timeout=2.5)
+                              return "unfollowed"
+                      except StaleElementReferenceException:
+                          continue
+              return "none"
+
+
+          # ------------------------------------------------------------------ instagram
+          IG_FOLLOW_XP = ("//button[normalize-space()='Follow' or normalize-space()='Seguir']"
+                          " | //button[.//div[normalize-space()='Follow' or normalize-space()='Seguir']]"
+                          " | //div[@role='button'][normalize-space()='Follow' or normalize-space()='Seguir']")
+
+
+          def ig_check_block(drv, log):
+              try:
+                  src = drv.page_source
+              except WebDriverException:
+                  return
+              for marker in ("Try Again Later", "Int\u00e9ntalo de nuevo", "Please wait a few minutes"):
+                  if marker in src:
+                      log("   !! Limite de Instagram detectado. Pausa de 5 min.")
+                      time.sleep(300)
+                      return
+
+
+          def ig_follow_in_scope(drv, scope, log):
+              try:
+                  btns = [b for b in scope.find_elements(By.XPATH, "." + IG_FOLLOW_XP) if b.is_displayed()]
+              except (WebDriverException, StaleElementReferenceException):
+                  return "none"
+              for b in btns:
+                  try:
+                      if (b.text or "").strip().lower() in FOLLOW_WORDS and click_el(drv, b):
+                          return "followed"
+                  except StaleElementReferenceException:
+                      continue
+              return "none"
+
+
+          def ig_loop_dialog(drv, dialog, cfg, log, stop, bump):
+              idle = 0
+              while not stop.is_set() and bump() < cfg["max_follows"]:
+                  if ig_follow_in_scope(drv, dialog, log) == "followed":
+                      idle = 0
+                      yield "followed"
+                      human(cfg["delay_min"], cfg["delay_max"])
+                      continue
+                  idle += 1
+                  try:
+                      drv.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", dialog)
+                  except WebDriverException:
+                      pass
+                  human(1.4, 2.8)
+                  if idle >= 6:
+                      return
+
+
+          def ig_collect_usernames(drv, url, log, stop, limit=500):
+              drv.get(url)
+              wait_doc(drv)
+              try:
+                  dialog = WebDriverWait(drv, 20).until(
+                      lambda d: d.find_element(By.XPATH, "//div[@role='dialog']"))
+              except Exception:
+                  log("   ! No se abrio el panel: " + url)
+                  return set()
+              names, idle = set(), 0
+              while not stop.is_set() and idle < 7:
+                  before = len(names)
+                  try:
+                      anchors = dialog.find_elements(By.XPATH, ".//a[contains(@href,'/')]")
+                  except WebDriverException:
+                      anchors = []
+                  for a in anchors:
+                      try:
+                          h = a.get_attribute("href") or ""
+                      except StaleElementReferenceException:
+                          continue
+                      m = re.search(r"instagram\.com/([^/?#]+)/?$", h)
+                      if m:
+                          names.add(m.group(1).lower())
+                  if len(names) >= limit:
+                      break
+                  idle = idle + 1 if len(names) == before else 0
+                  try:
+                      drv.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", dialog)
+                  except WebDriverException:
+                      pass
+                  human(1.1, 2.2)
+              log("   -> %d usuarios leidos" % len(names))
+              return names
+
+
+          def ig_unfollow_loop(drv, dialog, cfg, log, stop, bump, followers, whitelist):
+              done, idle = set(), 0
+              while not stop.is_set() and bump() < cfg["u_max"]:
+                  try:
+                      btns = dialog.find_elements(
+                          By.XPATH,
+                          ".//button[normalize-space()='Following' or normalize-space()='Siguiendo'"
+                          " or normalize-space()='Friends' or normalize-space()='Amigos']")
+                  except WebDriverException:
+                      btns = []
+                  acted = False
+                  for b in btns:
+                      name = row_username(drv, b)
+                      if name in done or name in whitelist:
+                          done.add(name)
+                          continue
+                      if cfg["nonmutual_only"] and followers is not None and name in followers:
+                          done.add(name)
+                          continue
+                      done.add(name)
+                      if not click_el(drv, b):
+                          continue
+                      human(0.6, 1.3)
+                      click_text(drv, UNFOLLOW_WORDS, timeout=3)
+                      bump(1)
+                      log("   - dejado de seguir: %s (%d)" % (name, bump()))
+                      acted = True
+                      human(cfg["u_delay_min"], cfg["u_delay_max"])
+                      break
+                  if acted:
+                      idle = 0
+                      continue
+                  idle += 1
+                  try:
+                      drv.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", dialog)
+                  except WebDriverException:
+                      pass
+                  human(1.4, 2.6)
+                  if idle >= 7:
+                      return
+
+
+          # ------------------------------------------------------------------ registro asistido
+          def guardar_cuenta(fila):
+              ruta = os.path.join(OUT_DIR, "cuentas.csv")
+              nuevo = not os.path.exists(ruta)
+              with open(ruta, "a", newline="", encoding="utf-8") as f:
+                  w = csv.writer(f, delimiter=";")
+                  if nuevo:
+                      w.writerow(["fecha", "plataforma", "email", "password", "nombre",
+                                  "usuario", "estado"])
+                  w.writerow(fila)
+              return ruta
+
+
+          def detectar_exito(drv, plataforma):
+              try:
+                  url = drv.current_url.lower()
+              except WebDriverException:
+                  return False
+              if plataforma == "tiktok":
+                  return ("/signup" not in url and "/login" not in url) or "foryou" in url
+              return ("emailsignup" not in url and "signup" not in url) or "onboarding" in url
+
+
+          def signup_tiktok(drv, ident, log, pausa_captcha, pedir_codigo):
+              drv.get(SIGNUP_URL["tiktok"])
+              wait_doc(drv)
+              human(2, 4)
+              try_select(drv, ["//select[@name='month']"], ident["month"], log, "mes")
+              human(0.3, 0.8)
+              try_fill(drv, ["//input[@name='day']"], ident["day"], log, "dia")
+              human(0.3, 0.8)
+              try_fill(drv, ["//input[@name='year']"], ident["year"], log, "anio")
+              human(0.5, 1.2)
+              try_fill(drv, ["//input[@name='email']", "//input[@type='email']"], ident["email"], log, "email")
+              human(0.4, 1.0)
+              try_fill(drv, ["//input[@name='password']", "//input[@type='password']"], ident["password"], log, "password")
+              human(0.8, 1.8)
+              click_text(drv, NEXT_WORDS, timeout=6)
+              log("   >> CAPTCHA: resuelvelo en el navegador y pulsa CONTINUAR.")
+              pausa_captcha()
+              human(2, 4)
+
+              codigo = pedir_codigo()
+              if codigo:
+                  if try_fill(drv, ["//input[@name='code']",
+                                    "//input[contains(@placeholder,'ódigo')]",
+                                    "//input[contains(@placeholder,'ode')]"], codigo, log, "codigo"):
+                      human(0.6, 1.4)
+                      click_text(drv, NEXT_WORDS, timeout=5)
+                      human(3, 6)
+
+              try_fill(drv, ["//input[@name='username']",
+                             "//input[contains(@placeholder,'sername')]"], ident["usuario"], log, "usuario")
+              human(0.5, 1.2)
+              click_text(drv, NEXT_WORDS, timeout=4)
+              human(4, 7)
+              return detectar_exito(drv, "tiktok")
+
+
+          def signup_instagram(drv, ident, log, pausa_captcha, pedir_codigo):
+              drv.get(SIGNUP_URL["instagram"])
+              wait_doc(drv)
+              human(2, 4)
+              try_fill(drv, ["//input[@name='emailOrPhone']", "//input[@name='email']",
+                             "//input[@type='email']"], ident["email"], log, "email")
+              human(0.4, 1.0)
+              try_fill(drv, ["//input[@name='fullName']"], ident["nombre"], log, "nombre")
+              human(0.4, 1.0)
+              try_fill(drv, ["//input[@name='username']"], ident["usuario"], log, "usuario")
+              human(0.4, 1.0)
+              try_fill(drv, ["//input[@name='password']"], ident["password"], log, "password")
+              human(0.5, 1.2)
+              try_select(drv, ["//select[@name='months']"], ident["month"], log, "mes")
+              try_select(drv, ["//select[@name='days']"], ident["day"], log, "dia")
+              try_select(drv, ["//select[@name='years']"], ident["year"], log, "anio")
+              human(0.8, 1.8)
+              click_text(drv, NEXT_WORDS, timeout=6)
+              log("   >> CAPTCHA: resuelvelo en el navegador y pulsa CONTINUAR.")
+              pausa_captcha()
+              human(2, 4)
+
+              codigo = pedir_codigo()
+              if codigo:
+                  if try_fill(drv, ["//input[@name='email_confirmation_code']",
+                                    "//input[@aria-label*='ódigo']",
+                                    "//input[@name='code']"], codigo, log, "codigo"):
+                      human(0.6, 1.4)
+                      click_text(drv, NEXT_WORDS, timeout=5)
+                      human(3, 6)
+              return detectar_exito(drv, "instagram")
+
+
+          def run_creacion(plataforma, modo_correo, cantidad, lista_propia, log,
+                           stop, pausa_captcha, pedir_codigo, on_fila):
+              drv = new_driver(plataforma, False)
+              hechas = 0
+              try:
+                  for i in range(1, cantidad + 1):
+                      if stop.is_set():
+                          break
+                      ident = nueva_identidad()
+
+                      if modo_correo == "temporal":
+                          log("== Cuenta %d/%d: creando buzon..." % (i, cantidad))
+                          try:
+                              mail = TempMail()
+                              ident["email"] = mail.create()
+                              log("   buzon: %s" % ident["email"])
+                          except Exception:
+                              log("   ! Fallo mail.tm, escribe el correo a mano.")
+                              ident["email"] = pedir_codigo(modo="email")
+                          getter = (lambda m=mail: m.codigo())
+                      elif modo_correo == "lista" and lista_propia:
+                          partes = lista_propia[(i - 1) % len(lista_propia)].split(":")
+                          ident["email"] = partes[0].strip()
+                          if len(partes) > 1 and partes[1].strip():
+                              ident["password"] = partes[1].strip()
+                          getter = (lambda: pedir_codigo(modo="codigo"))
+                      else:
+                          log("== Cuenta %d/%d: escribe el correo." % (i, cantidad))
+                          ident["email"] = pedir_codigo(modo="email")
+                          getter = (lambda: pedir_codigo(modo="codigo"))
+
+                      if not ident["email"]:
+                          log("   ! Sin correo, se omite.")
+                          continue
+
+                      log("   email=%s  pass=%s  user=%s" %
+                          (ident["email"], ident["password"], ident["usuario"]))
+
+                      try:
+                          if plataforma == "tiktok":
+                              ok = signup_tiktok(drv, ident, log, pausa_captcha, getter)
+                          else:
+                              ok = signup_instagram(drv, ident, log, pausa_captcha, getter)
+                      except Exception:
+                          log("   ! Error: " + traceback.format_exc(limit=2))
+                          ok = False
+
+                      estado = "ok" if ok else "revisar"
+                      ruta = guardar_cuenta([datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                             plataforma, ident["email"], ident["password"],
+                                             ident["nombre"], ident["usuario"], estado])
+                      on_fila(ident["email"], ident["usuario"], estado)
+                      log("   => guardado como '%s' en %s" % (estado, ruta))
+                      if ok:
+                          hechas += 1
+
+                      human(8, 16)
+              finally:
+                  try:
+                      drv.quit()
+                  except Exception:
+                      pass
+                  log("== Lote terminado. Correctas: %d de %d" % (hechas, cantidad))
+
+
+          # ------------------------------------------------------------------ workers sociales
+          def run_followers(platform, mode, targets, cfg, log, stop, bump):
+              drv = new_driver(platform, cfg["headless"])
+              try:
+                  for target in targets:
+                      if stop.is_set() or bump() >= cfg["max_follows"]:
+                          break
+                      log("== Objetivo: %s" % target)
+                      if platform == "tiktok":
+                          for link in tt_collect_links(drv, target.lstrip("#"), 30, log):
+                              if stop.is_set() or bump() >= cfg["max_follows"]:
+                                  break
+                              drv.get(link)
+                              wait_doc(drv, 20)
+                              res = tt_follow(drv)
+                              if res == "followed":
+                                  if cfg["do_like"]:
+                                      tt_like(drv)
+                                  bump(1)
+                                  log("   + seguido (%d)" % bump())
+                              elif res == "already":
+                                  log("   = ya seguido")
+                              else:
+                                  log("   - sin boton")
+                              human(cfg["delay_min"], cfg["delay_max"])
+                              if bump() and bump() % max(1, cfg["break_every"]) == 0:
+                                  log("   ... descanso de %ds" % cfg["break_seconds"])
+                                  time.sleep(cfg["break_seconds"])
+                          continue
+
+                      if mode == "cuenta":
+                          drv.get("https://www.instagram.com/%s/followers/" % target.lstrip("@"))
+                          wait_doc(drv)
+                          try:
+                              dialog = WebDriverWait(drv, 20).until(
+                                  lambda d: d.find_element(By.XPATH, "//div[@role='dialog']"))
+                          except Exception:
+                              log("   ! No se abrio el panel de seguidores")
+                              continue
+                          for r in ig_loop_dialog(drv, dialog, cfg, log, stop, bump):
+                              if r == "followed":
+                                  bump(1)
+                                  log("   + seguido (%d)" % bump())
+                              ig_check_block(drv, log)
+                      else:
+                          drv.get("https://www.instagram.com/explore/tags/%s/" % target.lstrip("#"))
+                          wait_doc(drv)
+                          try:
+                              posts = drv.find_elements(By.XPATH, "//article//a[contains(@href,'/p/')]")[:12]
+                          except WebDriverException:
+                              posts = []
+                          for p in posts:
+                              link = p.get_attribute("href")
+                              if not link or stop.is_set() or bump() >= cfg["max_follows"]:
+                                  continue
+                              drv.get(link)
+                              wait_doc(drv, 20)
+                              if ig_follow_in_scope(drv, drv, log) == "followed":
+                                  bump(1)
+                                  log("   + seguido (%d)" % bump())
+                              human(cfg["delay_min"], cfg["delay_max"])
+                              ig_check_block(drv, log)
+              finally:
+                  try:
+                      drv.quit()
+                  except Exception:
+                      pass
+
+
+          def run_unfollow(platform, username, mode, targets, whitelist, cfg, log, stop, bump):
+              drv = new_driver(platform, cfg["headless"])
+              try:
+                  if mode == "lista":
+                      for name in targets:
+                          if stop.is_set() or bump() >= cfg["u_max"]:
+                              break
+                          log("== Perfil: %s" % name)
+                          drv.get("https://www.%s.com/%s" % (platform, name))
+                          wait_doc(drv)
+                          if platform == "tiktok":
+                              res = tt_unfollow_here(drv)
+                          else:
+                              res = "none"
+                              for xp in ["//button[normalize-space()='Following' or normalize-space()='Siguiendo']",
+                                         "//div[@role='button'][normalize-space()='Following' or normalize-space()='Siguiendo']"]:
+                                  try:
+                                      bs = drv.find_elements(By.XPATH, xp)
+                                  except WebDriverException:
+                                      bs = []
+                                  for b in bs:
+                                      if b.is_displayed():
+                                          click_el(drv, b)
+                                          human(0.6, 1.2)
+                                          if click_text(drv, UNFOLLOW_WORDS, timeout=3):
+                                              res = "unfollowed"
+                                          break
+                                  if res == "unfollowed":
+                                      break
+                          if res == "unfollowed":
+                              bump(1)
+                              log("   - dejado de seguir (%d)" % bump())
+                          else:
+                              log("   = no se seguia / sin boton")
+                          human(cfg["u_delay_min"], cfg["u_delay_max"])
+                      return
+
+                  if platform == "instagram":
+                      followers = None
+                      if cfg["nonmutual_only"]:
+                          log("== Leyendo tus seguidores para no tocarlos...")
+                          followers = ig_collect_usernames(
+                              drv, "https://www.instagram.com/%s/followers/" % username, log, stop)
+                      drv.get("https://www.instagram.com/%s/following/" % username)
+                      wait_doc(drv)
+                      try:
+                          dialog = WebDriverWait(drv, 20).until(
+                              lambda d: d.find_element(By.XPATH, "//div[@role='dialog']"))
+                      except Exception:
+                          log("   ! No se abrio la lista de seguidos")
+                          return
+                      ig_unfollow_loop(drv, dialog, cfg, log, stop, bump, followers, whitelist)
+                      return
+
+                  scope = tt_open_following(drv, username, log)
+                  if scope is None:
+                      return
+                  done, idle = set(), 0
+                  while not stop.is_set() and bump() < cfg["u_max"]:
+                      try:
+                          btns = scope.find_elements(
+                              By.XPATH,
+                              ".//button[normalize-space()='Following' or normalize-space()='Siguiendo'"
+                              " or normalize-space()='Amigos' or normalize-space()='Friends']")
+                      except WebDriverException:
+                          btns = []
+                      acted = False
+                      for b in btns:
+                          name = row_username(drv, b)
+                          if name in done or name in whitelist:
+                              done.add(name)
+                              continue
+                          txt = (b.text or "").strip().lower()
+                          if cfg["nonmutual_only"] and txt in ("amigos", "friends"):
+                              done.add(name)
+                              continue
+                          done.add(name)
+                          if not click_el(drv, b):
+                              continue
+                          human(0.6, 1.3)
+                          click_text(drv, UNFOLLOW_WORDS, timeout=2.5)
+                          bump(1)
+                          log("   - dejado de seguir: %s (%d)" % (name, bump()))
+                          acted = True
+                          human(cfg["u_delay_min"], cfg["u_delay_max"])
+                          break
+                      if acted:
+                          idle = 0
+                          continue
+                      idle += 1
+                      try:
+                          drv.execute_script("arguments[0].scrollTop = arguments[0].scrollHeight", scope)
+                      except WebDriverException:
+                          pass
+                      human(1.4, 2.6)
+                      if idle >= 7:
+                          return
+              finally:
+                  try:
+                      drv.quit()
+                  except Exception:
+                      pass
+
+
+          # ------------------------------------------------------------------ GUI
+          class App(tk.Tk):
+              def __init__(self):
+                  super().__init__()
+                  self.title("SocialBoost - Crecimiento organico TikTok / Instagram")
+                  self.geometry("1120x860")
+                  self.minsize(980, 740)
+                  self.cfg = load_cfg()
+                  self.drv = None
+                  self.q = queue.Queue()
+                  self.stop_flag = threading.Event()
+                  self.resume_flag = threading.Event()
+                  self.code_event = threading.Event()
+                  self.code_value = tk.StringVar()
+                  self.mail_value = tk.StringVar()
+                  self.counter = 0
+                  self._build()
+                  self.after(120, self._drain)
+                  self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+              def _build(self):
+                  nb = ttk.Notebook(self)
+                  nb.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+
+                  self.tab_f = ttk.Frame(nb)
+                  self.tab_u = ttk.Frame(nb)
+                  self.tab_c = ttk.Frame(nb)
+                  nb.add(self.tab_f, text="  Generar seguidores  ")
+                  nb.add(self.tab_u, text="  Dejar de seguir  ")
+                  nb.add(self.tab_c, text="  Crear cuentas  ")
+
+                  self._build_followers(self.tab_f)
+                  self._build_unfollow(self.tab_u)
+                  self._build_create(self.tab_c)
+
+                  bottom = ttk.Frame(self)
+                  bottom.pack(fill="both", expand=True, padx=10, pady=10)
+
+                  self.log_box = ScrolledText(bottom, height=12, state="disabled",
+                                              bg="#0d1117", fg="#c9d1d9", insertbackground="#c9d1d9",
+                                              font=("Consolas", 9))
+                  self.log_box.pack(fill="both", expand=True)
+
+                  bar = ttk.Frame(bottom)
+                  bar.pack(fill="x", pady=(6, 0))
+                  self.v_stat = tk.StringVar(value="Listo.")
+                  ttk.Label(bar, textvariable=self.v_stat).pack(side="left")
+                  ttk.Button(bar, text="Limpiar log", command=self._clear_log).pack(side="right")
+                  ttk.Button(bar, text="Abrir carpeta de salida",
+                             command=lambda: os.startfile(OUT_DIR)).pack(side="right", padx=8)
+
+              def _build_followers(self, root):
+                  top = ttk.Frame(root)
+                  top.pack(fill="x", padx=8, pady=5)
+
+                  ttk.Label(top, text="Plataforma:").grid(row=0, column=0, sticky="w")
+                  self.cb_platform = ttk.Combobox(top, values=["tiktok", "instagram"],
+                                                  state="readonly", width=14)
+                  self.cb_platform.current(0)
+                  self.cb_platform.grid(row=0, column=1, sticky="w", padx=6)
+
+                  ttk.Label(top, text="Modo:").grid(row=0, column=2, sticky="w", padx=(18, 0))
+                  self.cb_mode = ttk.Combobox(top, values=["hashtags", "cuenta objetivo"],
+                                              state="readonly", width=18)
+                  self.cb_mode.current(0)
+                  self.cb_mode.grid(row=0, column=3, sticky="w", padx=6)
+
+                  ttk.Label(top, text="Max. follows:").grid(row=0, column=4, sticky="w", padx=(18, 0))
+                  self.e_max = ttk.Entry(top, width=7)
+                  self.e_max.insert(0, str(self.cfg["max_follows"]))
+                  self.e_max.grid(row=0, column=5, sticky="w", padx=6)
+
+                  self.v_like = tk.BooleanVar(value=self.cfg["do_like"])
+                  self.v_head = tk.BooleanVar(value=self.cfg["headless"])
+                  ttk.Checkbutton(top, text="Dar like", variable=self.v_like).grid(row=0, column=6, padx=10)
+                  ttk.Checkbutton(top, text="Headless", variable=self.v_head).grid(row=0, column=7, padx=4)
+
+                  ttk.Label(root, text="Objetivos (un hashtag o una cuenta por linea):").pack(anchor="w", padx=8)
+                  self.txt_targets = ScrolledText(root, height=7, font=("Consolas", 10))
+                  self.txt_targets.pack(fill="both", expand=True, padx=8, pady=(2, 8))
+                  self.txt_targets.insert("1.0", "#parati\n#fyp\n#humor")
+
+                  mid = ttk.Frame(root)
+                  mid.pack(fill="x", padx=8, pady=4)
+                  for label, key, col in (("Retardo min (s):", "delay_min", 0),
+                                          ("Retardo max (s):", "delay_max", 2),
+                                          ("Descanso cada:", "break_every", 4),
+                                          ("Duracion descanso:", "break_seconds", 6)):
+                      ttk.Label(mid, text=label).grid(row=0, column=col, sticky="w")
+                      e = ttk.Entry(mid, width=7)
+                      e.insert(0, str(self.cfg[key]))
+                      e.grid(row=0, column=col + 1, sticky="w", padx=(4, 16))
+                      setattr(self, "e_" + key, e)
+
+                  act = ttk.Frame(root)
+                  act.pack(fill="x", padx=8, pady=(4, 10))
+                  ttk.Button(act, text="1) Abrir navegador / login",
+                             command=self.on_login).pack(side="left")
+                  ttk.Button(act, text="2) Guardar sesion y cerrar",
+                             command=self.on_close_browser).pack(side="left", padx=6)
+                  ttk.Button(act, text="3) EJECUTAR", command=self.on_run).pack(side="left", padx=6)
+                  ttk.Button(act, text="DETENER", command=self.on_stop).pack(side="left")
+
+              def _build_unfollow(self, root):
+                  top = ttk.Frame(root)
+                  top.pack(fill="x", padx=8, pady=6)
+
+                  ttk.Label(top, text="Plataforma:").grid(row=0, column=0, sticky="w")
+                  self.cb_uplat = ttk.Combobox(top, values=["tiktok", "instagram"],
+                                               state="readonly", width=14)
+                  self.cb_uplat.current(0)
+                  self.cb_uplat.grid(row=0, column=1, sticky="w", padx=6)
+
+                  ttk.Label(top, text="Modo:").grid(row=0, column=2, sticky="w", padx=(18, 0))
+                  self.cb_umode = ttk.Combobox(top, values=["masivo desde mi perfil", "lista manual"],
+                                               state="readonly", width=24)
+                  self.cb_umode.current(0)
+                  self.cb_umode.grid(row=0, column=3, sticky="w", padx=6)
+
+                  ttk.Label(top, text="Tu usuario (sin @):").grid(row=0, column=4, sticky="w", padx=(18, 0))
+                  self.e_me = ttk.Entry(top, width=18)
+                  self.e_me.grid(row=0, column=5, sticky="w", padx=6)
+
+                  ttk.Label(top, text="Max. unfollows:").grid(row=0, column=6, sticky="w", padx=(18, 0))
+                  self.e_umax = ttk.Entry(top, width=7)
+                  self.e_umax.insert(0, str(self.cfg["u_max"]))
+                  self.e_umax.grid(row=0, column=7, sticky="w", padx=6)
+
+                  opt = ttk.Frame(root)
+                  opt.pack(fill="x", padx=8, pady=2)
+                  self.v_nonmutual = tk.BooleanVar(value=self.cfg["nonmutual_only"])
+                  ttk.Checkbutton(opt, text="Solo a quienes NO me siguen de vuelta",
+                                  variable=self.v_nonmutual).pack(side="left")
+
+                  for label, key in (("Retardo min (s):", "u_delay_min"),
+                                     ("Retardo max (s):", "u_delay_max")):
+                      ttk.Label(opt, text=label).pack(side="left", padx=(24, 2))
+                      e = ttk.Entry(opt, width=6)
+                      e.insert(0, str(self.cfg[key]))
+                      e.pack(side="left")
+                      setattr(self, "e_" + key, e)
+
+                  cols = ttk.Frame(root)
+                  cols.pack(fill="both", expand=True, padx=8, pady=6)
+
+                  left = ttk.Frame(cols)
+                  left.pack(side="left", fill="both", expand=True)
+                  ttk.Label(left, text="Lista manual (solo en modo lista):").pack(anchor="w")
+                  self.txt_ulist = ScrolledText(left, height=6, font=("Consolas", 10))
+                  self.txt_ulist.pack(fill="both", expand=True, pady=(2, 0))
+
+                  right = ttk.Frame(cols)
+                  right.pack(side="left", fill="both", expand=True, padx=(8, 0))
+                  ttk.Label(right, text="Nunca dejar de seguir a (whitelist):").pack(anchor="w")
+                  self.txt_white = ScrolledText(right, height=6, font=("Consolas", 10))
+                  self.txt_white.pack(fill="both", expand=True, pady=(2, 0))
+
+                  act = ttk.Frame(root)
+                  act.pack(fill="x", padx=8, pady=(0, 10))
+                  ttk.Button(act, text="EJECUTAR UNFOLLOW",
+                             command=self.on_unfollow).pack(side="left")
+                  ttk.Button(act, text="DETENER", command=self.on_stop).pack(side="left", padx=6)
+
+              def _build_create(self, root):
+                  top = ttk.Frame(root)
+                  top.pack(fill="x", padx=8, pady=8)
+
+                  ttk.Label(top, text="Plataforma:").grid(row=0, column=0, sticky="w")
+                  self.cb_cplat = ttk.Combobox(top, values=["tiktok", "instagram"],
+                                               state="readonly", width=14)
+                  self.cb_cplat.current(0)
+                  self.cb_cplat.grid(row=0, column=1, sticky="w", padx=6)
+
+                  ttk.Label(top, text="Correo:").grid(row=0, column=2, sticky="w", padx=(18, 0))
+                  self.cb_cmail = ttk.Combobox(
+                      top, values=["temporal automatico (mail.tm)", "lista propia", "manual"],
+                      state="readonly", width=30)
+                  self.cb_cmail.current(0)
+                  self.cb_cmail.grid(row=0, column=3, sticky="w", padx=6)
+
+                  ttk.Label(top, text="Cantidad:").grid(row=0, column=4, sticky="w", padx=(18, 0))
+                  self.e_cant = ttk.Entry(top, width=7)
+                  self.e_cant.insert(0, str(self.cfg["cantidad"]))
+                  self.e_cant.grid(row=0, column=5, sticky="w", padx=6)
+
+                  ttk.Label(root, text="Lista propia (email:password opcional, solo en ese modo):").pack(
+                      anchor="w", padx=8, pady=(6, 2))
+                  self.txt_accounts = ScrolledText(root, height=5, font=("Consolas", 10))
+                  self.txt_accounts.pack(fill="both", expand=True, padx=8)
+
+                  panel = ttk.LabelFrame(root, text=" Control manual del captcha y del codigo ")
+                  panel.pack(fill="x", padx=8, pady=8)
+
+                  fila1 = ttk.Frame(panel)
+                  fila1.pack(fill="x", padx=8, pady=6)
+                  ttk.Button(fila1, text="CAPTCHA RESUELTO - CONTINUAR",
+                             command=lambda: self.resume_flag.set()).pack(side="left")
+                  ttk.Label(fila1, text="  Correo actual:").pack(side="left")
+                  ttk.Entry(fila1, textvariable=self.mail_value, width=34,
+                            state="readonly").pack(side="left", padx=6)
+
+                  fila2 = ttk.Frame(panel)
+                  fila2.pack(fill="x", padx=8, pady=(0, 8))
+                  ttk.Label(fila2, text="Codigo recibido:").pack(side="left")
+                  ttk.Entry(fila2, textvariable=self.code_value, width=16).pack(side="left", padx=6)
+                  ttk.Button(fila2, text="ENVIAR CODIGO",
+                             command=self._send_code).pack(side="left")
+                  ttk.Label(fila2, text="  (rellena tambien el correo si te lo pide)",
+                            foreground="#666").pack(side="left")
+
+                  act = ttk.Frame(root)
+                  act.pack(fill="x", padx=8, pady=(0, 10))
+                  ttk.Button(act, text="INICIAR CREACION", command=self.on_create).pack(side="left")
+                  ttk.Button(act, text="DETENER", command=self.on_stop).pack(side="left", padx=6)
+
+                  self.tv = ttk.Treeview(act, columns=("email", "user", "estado"),
+                                         show="headings", height=4)
+                  for c, w in (("email", 260), ("user", 170), ("estado", 90)):
+                      self.tv.heading(c, text=c)
+                      self.tv.column(c, width=w)
+                  self.tv.pack(side="right", fill="x", expand=True, padx=(20, 0))
+
+              # -- infra
+              def log(self, msg):
+                  self.q.put(msg)
+
+              def _drain(self):
+                  while True:
+                      try:
+                          msg = self.q.get_nowait()
+                      except queue.Empty:
+                          break
+                      stamp = time.strftime("%H:%M:%S")
+                      self.log_box.configure(state="normal")
+                      self.log_box.insert("end", "[%s] %s\n" % (stamp, msg))
+                      self.log_box.see("end")
+                      self.log_box.configure(state="disabled")
+                  self.v_stat.set("Acciones: %d | Estado: %s" % (
+                      self.counter, "detenido" if self.stop_flag.is_set() else "activo"))
+                  self.after(120, self._drain)
+
+              def _clear_log(self):
+                  self.log_box.configure(state="normal")
+                  self.log_box.delete("1.0", "end")
+                  self.log_box.configure(state="disabled")
+
+              def _send_code(self):
+                  self.code_event.set()
+
+              def _num(self, entry, default, cast=float):
+                  try:
+                      return cast(entry.get())
+                  except Exception:
+                      return default
+
+              def _read_cfg(self):
+                  self.cfg.update({
+                      "delay_min": self._num(self.e_delay_min, DEFAULT_CFG["delay_min"]),
+                      "delay_max": self._num(self.e_delay_max, DEFAULT_CFG["delay_max"]),
+                      "max_follows": self._num(self.e_max, DEFAULT_CFG["max_follows"], int),
+                      "break_every": self._num(self.e_break_every, DEFAULT_CFG["break_every"], int),
+                      "break_seconds": self._num(self.e_break_seconds, DEFAULT_CFG["break_seconds"], int),
+                      "do_like": self.v_like.get(),
+                      "headless": self.v_head.get(),
+                      "u_delay_min": self._num(self.e_u_delay_min, DEFAULT_CFG["u_delay_min"]),
+                      "u_delay_max": self._num(self.e_u_delay_max, DEFAULT_CFG["u_delay_max"]),
+                      "u_max": self._num(self.e_umax, DEFAULT_CFG["u_max"], int),
+                      "nonmutual_only": self.v_nonmutual.get(),
+                      "cantidad": self._num(self.e_cant, DEFAULT_CFG["cantidad"], int),
+                  })
+                  save_cfg(self.cfg)
+                  return self.cfg
+
+              def _lines(self, widget):
+                  return [t.strip() for t in widget.get("1.0", "end").splitlines() if t.strip()]
+
+              def _guard(self):
+                  if self.worker and self.worker.is_alive():
+                      messagebox.showinfo("En curso", "Ya hay un proceso activo.")
+                      return False
+                  return True
+
+              # -- acciones
+              def on_login(self):
+                  plat = self.cb_platform.get()
+                  try:
+                      if self.drv is not None:
+                          self.drv.quit()
+                  except Exception:
+                      pass
+                  self.log("Abriendo navegador... inicia sesion manualmente.")
+                  try:
+                      self.drv = new_driver(plat, False)
+                      self.drv.get(LOGIN_URL[plat])
+                  except Exception:
+                      self.log("ERROR: " + traceback.format_exc(limit=2))
+
+              def on_close_browser(self):
+                  try:
+                      if self.drv is not None:
+                          self.drv.quit()
+                          self.drv = None
+                          self.log("Navegador cerrado. Sesion guardada.")
+                  except Exception:
+                      self.log("ERROR: " + traceback.format_exc(limit=2))
+
+              def on_stop(self):
+                  self.stop_flag.set()
+                  self.resume_flag.set()
+                  self.code_event.set()
+                  self.log("Detencion solicitada...")
+
+              def on_run(self):
+                  if not self._guard():
+                      return
+                  cfg = self._read_cfg()
+                  plat = self.cb_platform.get()
+                  mode = "cuenta" if self.cb_mode.get() == "cuenta objetivo" else "hashtag"
+                  targets = self._lines(self.txt_targets)
+                  if not targets:
+                      messagebox.showwarning("Sin objetivos", "Escribe al menos un hashtag o cuenta.")
+                      return
+                  self.stop_flag.clear()
+                  self.counter = 0
+
+                  def bump(inc=0):
+                      self.counter += inc
+                      return self.counter
+
+                  def job():
+                      try:
+                          run_followers(plat, mode, targets, cfg, self.log, self.stop_flag, bump)
+                          self.log("== Proceso finalizado. Total: %d" % self.counter)
+                      except Exception:
+                          self.log("ERROR: " + traceback.format_exc(limit=3))
+
+                  self.worker = threading.Thread(target=job, daemon=True)
+                  self.worker.start()
+
+              def on_unfollow(self):
+                  if not self._guard():
+                      return
+                  cfg = self._read_cfg()
+                  plat = self.cb_uplat.get()
+                  mode = "lista" if self.cb_umode.get() == "lista manual" else "masivo"
+                  targets = self._lines(self.txt_ulist)
+                  whitelist = set(n.lstrip("@").lower()
+                                  for n in re.split(r"[\n,;]+", self.txt_white.get("1.0", "end")) if n.strip())
+                  username = self.e_me.get().strip().lstrip("@")
+                  if mode == "lista" and not targets:
+                      messagebox.showwarning("Sin lista", "Agrega usuarios a la lista manual.")
+                      return
+                  if mode == "masivo" and not username:
+                      messagebox.showwarning("Falta usuario", "Indica tu usuario.")
+                      return
+                  self.stop_flag.clear()
+                  self.counter = 0
+
+                  def bump(inc=0):
+                      self.counter += inc
+                      return self.counter
+
+                  def job():
+                      try:
+                          run_unfollow(plat, username, mode, targets, whitelist, cfg,
+                                       self.log, self.stop_flag, bump)
+                          self.log("== Unfollow finalizado. Total: %d" % self.counter)
+                      except Exception:
+                          self.log("ERROR: " + traceback.format_exc(limit=3))
+
+                  self.worker = threading.Thread(target=job, daemon=True)
+                  self.worker.start()
+
+              def on_create(self):
+                  if not self._guard():
+                      return
+                  cfg = self._read_cfg()
+                  plat = self.cb_cplat.get()
+                  modo = self.cb_cmail.get()
+                  modo = ("temporal" if modo.startswith("temporal")
+                          else "lista" if modo == "lista propia" else "manual")
+                  lista = self._lines(self.txt_accounts)
+                  if modo == "lista" and not lista:
+                      messagebox.showwarning("Sin correos", "Agrega la lista propia.")
+                      return
+                  self.stop_flag.clear()
+                  self.counter = 0
+                  for i in self.tv.get_children():
+                      self.tv.delete(i)
+
+                  def pausa_captcha():
+                      self.resume_flag.clear()
+                      self.resume_flag.wait(900)
+
+                  def pedir_codigo(modo="codigo"):
+                      if modo == "email":
+                          self.code_event.clear()
+                          self.log("   >> Escribe el correo en el campo y pulsa ENVIAR CODIGO.")
+                          self.code_event.wait(600)
+                          self.code_event.clear()
+                          return self.code_value.get().strip()
+                      self.code_event.clear()
+                      self.log("   >> Esperando codigo de verificacion...")
+                      self.code_event.wait(600)
+                      self.code_event.clear()
+                      return self.code_value.get().strip()
+
+                  def on_fila(email, usuario, estado):
+                      self.tv.insert("", "end", values=(email, usuario, estado))
+
+                  def job():
+                      try:
+                          run_creacion(plat, modo, max(1, cfg["cantidad"]), lista, self.log,
+                                       self.stop_flag, pausa_captcha, pedir_codigo, on_fila)
+                      except Exception:
+                          self.log("ERROR: " + traceback.format_exc(limit=3))
+
+                  self.worker = threading.Thread(target=job, daemon=True)
+                  self.worker.start()
+
+              def _on_close(self):
+                  self.stop_flag.set()
+                  self.resume_flag.set()
+                  self.code_event.set()
+                  try:
+                      if self.drv is not None:
+                          self.drv.quit()
+                  except Exception:
+                      pass
+                  self.destroy()
+
+
+          if __name__ == "__main__":
+              App().mainloop()
+          PYEOF
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install selenium pyinstaller
+
+      - name: Compilar EXE
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed ^
+            --name SocialBoost ^
+            --collect-all selenium ^
+            --hidden-import selenium.webdriver.chrome.service ^
+            app.py
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: SocialBoost-Windows
+          path: dist/SocialBoost.exe
+          retention-days: 30
+
+      - name: Publicar release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SocialBoost.exe
