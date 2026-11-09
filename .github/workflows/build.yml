@@ -80,6 +80,15 @@ jobs:
           NEXT_WORDS = ("next", "siguiente", "continue", "continuar",
                         "sign up", "registrarte", "crear cuenta", "submit")
 
+          CODE_XP = {
+              "tiktok": ["//input[@name='code']",
+                         "//input[contains(@placeholder,'ódigo')]",
+                         "//input[contains(@placeholder,'ode')]"],
+              "instagram": ["//input[@name='email_confirmation_code']",
+                            "//input[@aria-label*='ódigo']",
+                            "//input[@name='code']"],
+          }
+
           DEFAULT_CFG = {
               "delay_min": 4.0, "delay_max": 11.0, "max_follows": 150,
               "break_every": 25, "break_seconds": 120,
@@ -120,7 +129,8 @@ jobs:
 
           def new_driver(platform, headless):
               opts = webdriver.ChromeOptions()
-              prof = os.path.join(PROFILE_DIR, platform + ("_signup" if headless == "signup" else ""))
+              sufijo = "_signup" if headless == "signup" else ""
+              prof = os.path.join(PROFILE_DIR, platform + sufijo)
               os.makedirs(prof, exist_ok=True)
               opts.add_argument("--user-data-dir=" + prof)
               opts.add_argument("--no-first-run")
@@ -222,6 +232,19 @@ jobs:
               return False
 
 
+          def hay_input(drv, xpaths, timeout=25):
+              end = time.time() + timeout
+              while time.time() < end:
+                  for xp in xpaths:
+                      try:
+                          if any(e.is_displayed() for e in drv.find_elements(By.XPATH, xp)):
+                              return True
+                      except WebDriverException:
+                          pass
+                  time.sleep(1)
+              return False
+
+
           def scroll_page(drv, times=3):
               for _ in range(times):
                   drv.execute_script("window.scrollBy(0, arguments[0]);", random.randint(350, 950))
@@ -286,16 +309,18 @@ jobs:
                               full = self._req("/messages/" + m["id"])
                           except Exception:
                               continue
-                          txt = full.get("subject", "") or ""
-                          for part in full.get("text", []) or []:
-                              if isinstance(part, str):
-                                  txt += " " + part
-                          for part in full.get("html", []) or []:
-                              if isinstance(part, str):
-                                  txt += " " + re.sub(r"<[^>]+>", " ", part)
-                          m6 = re.findall(r"\b(\d{6,8})\b", txt)
-                          if m6:
-                              return m6[0]
+                          txt = full.get("subject") or ""
+                          cuerpo = full.get("text")
+                          if isinstance(cuerpo, str):
+                              txt += " " + cuerpo
+                          elif isinstance(cuerpo, list):
+                              txt += " " + " ".join(x for x in cuerpo if isinstance(x, str))
+                          for trozo in full.get("html") or []:
+                              if isinstance(trozo, str):
+                                  txt += " " + re.sub(r"<[^>]+>", " ", trozo)
+                          hallados = re.findall(r"\b(\d{6,8})\b", txt)
+                          if hallados:
+                              return hallados[0]
                       time.sleep(4)
                   return None
 
@@ -573,8 +598,8 @@ jobs:
               except WebDriverException:
                   return False
               if plataforma == "tiktok":
-                  return ("/signup" not in url and "/login" not in url) or "foryou" in url
-              return ("emailsignup" not in url and "signup" not in url) or "onboarding" in url
+                  return "/signup" not in url and "/login" not in url
+              return "emailsignup" not in url and "signup" not in url
 
 
           def signup_tiktok(drv, ident, log, pausa_captcha, pedir_codigo):
@@ -596,14 +621,14 @@ jobs:
               pausa_captcha()
               human(2, 4)
 
-              codigo = pedir_codigo()
-              if codigo:
-                  if try_fill(drv, ["//input[@name='code']",
-                                    "//input[contains(@placeholder,'ódigo')]",
-                                    "//input[contains(@placeholder,'ode')]"], codigo, log, "codigo"):
+              if hay_input(drv, CODE_XP["tiktok"]):
+                  codigo = pedir_codigo()
+                  if codigo and try_fill(drv, CODE_XP["tiktok"], codigo, log, "codigo"):
                       human(0.6, 1.4)
                       click_text(drv, NEXT_WORDS, timeout=5)
                       human(3, 6)
+              else:
+                  log("   (sin paso de codigo)")
 
               try_fill(drv, ["//input[@name='username']",
                              "//input[contains(@placeholder,'sername')]"], ident["usuario"], log, "usuario")
@@ -635,51 +660,56 @@ jobs:
               pausa_captcha()
               human(2, 4)
 
-              codigo = pedir_codigo()
-              if codigo:
-                  if try_fill(drv, ["//input[@name='email_confirmation_code']",
-                                    "//input[@aria-label*='ódigo']",
-                                    "//input[@name='code']"], codigo, log, "codigo"):
+              if hay_input(drv, CODE_XP["instagram"]):
+                  codigo = pedir_codigo()
+                  if codigo and try_fill(drv, CODE_XP["instagram"], codigo, log, "codigo"):
                       human(0.6, 1.4)
                       click_text(drv, NEXT_WORDS, timeout=5)
                       human(3, 6)
+              else:
+                  log("   (sin paso de codigo)")
               return detectar_exito(drv, "instagram")
 
 
           def run_creacion(plataforma, modo_correo, cantidad, lista_propia, log,
-                           stop, pausa_captcha, pedir_codigo, on_fila):
-              drv = new_driver(plataforma, False)
+                           stop, pausa_captcha, pedir_codigo, on_fila, on_mail):
+              drv = new_driver(plataforma, "signup")
               hechas = 0
               try:
                   for i in range(1, cantidad + 1):
                       if stop.is_set():
                           break
                       ident = nueva_identidad()
+                      getter = None
 
                       if modo_correo == "temporal":
                           log("== Cuenta %d/%d: creando buzon..." % (i, cantidad))
                           try:
                               mail = TempMail()
                               ident["email"] = mail.create()
+                              on_mail(ident["email"])
                               log("   buzon: %s" % ident["email"])
+                              getter = (lambda m=mail: m.codigo())
                           except Exception:
                               log("   ! Fallo mail.tm, escribe el correo a mano.")
                               ident["email"] = pedir_codigo(modo="email")
-                          getter = (lambda m=mail: m.codigo())
                       elif modo_correo == "lista" and lista_propia:
                           partes = lista_propia[(i - 1) % len(lista_propia)].split(":")
                           ident["email"] = partes[0].strip()
                           if len(partes) > 1 and partes[1].strip():
                               ident["password"] = partes[1].strip()
-                          getter = (lambda: pedir_codigo(modo="codigo"))
+                          on_mail(ident["email"])
                       else:
                           log("== Cuenta %d/%d: escribe el correo." % (i, cantidad))
                           ident["email"] = pedir_codigo(modo="email")
-                          getter = (lambda: pedir_codigo(modo="codigo"))
+                          on_mail(ident["email"])
 
                       if not ident["email"]:
                           log("   ! Sin correo, se omite.")
                           continue
+
+                      if getter is None:
+                          getter = (lambda: pedir_codigo(modo="codigo"))
 
                       log("   email=%s  pass=%s  user=%s" %
                           (ident["email"], ident["password"], ident["usuario"]))
@@ -900,6 +930,7 @@ jobs:
                   self.code_value = tk.StringVar()
                   self.mail_value = tk.StringVar()
                   self.counter = 0
+                  self.worker = None
                   self._build()
                   self.after(120, self._drain)
                   self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1091,7 +1122,7 @@ jobs:
                   ttk.Entry(fila2, textvariable=self.code_value, width=16).pack(side="left", padx=6)
                   ttk.Button(fila2, text="ENVIAR CODIGO",
                              command=self._send_code).pack(side="left")
-                  ttk.Label(fila2, text="  (rellena tambien el correo si te lo pide)",
+                  ttk.Label(fila2, text="  (usa ENVIAR CODIGO tambien para confirmar el correo manual)",
                             foreground="#666").pack(side="left")
 
                   act = ttk.Frame(root)
@@ -1101,7 +1132,7 @@ jobs:
 
                   self.tv = ttk.Treeview(act, columns=("email", "user", "estado"),
                                          show="headings", height=4)
-                  for c, w in (("email", 260), ("user", 170), ("estado", 90)):
+                  for c, w in (("email", 250), ("user", 160), ("estado", 80)):
                       self.tv.heading(c, text=c)
                       self.tv.column(c, width=w)
                   self.tv.pack(side="right", fill="x", expand=True, padx=(20, 0))
@@ -1116,6 +1147,12 @@ jobs:
                           msg = self.q.get_nowait()
                       except queue.Empty:
                           break
+                      if isinstance(msg, tuple):
+                          if msg[0] == "MAIL":
+                              self.mail_value.set(msg[1])
+                          elif msg[0] == "ROW":
+                              self.tv.insert("", "end", values=msg[1:])
+                          continue
                       stamp = time.strftime("%H:%M:%S")
                       self.log_box.configure(state="normal")
                       self.log_box.insert("end", "[%s] %s\n" % (stamp, msg))
@@ -1279,25 +1316,26 @@ jobs:
                       self.resume_flag.wait(900)
 
                   def pedir_codigo(modo="codigo"):
-                      if modo == "email":
-                          self.code_event.clear()
-                          self.log("   >> Escribe el correo en el campo y pulsa ENVIAR CODIGO.")
-                          self.code_event.wait(600)
-                          self.code_event.clear()
-                          return self.code_value.get().strip()
                       self.code_event.clear()
-                      self.log("   >> Esperando codigo de verificacion...")
+                      if modo == "email":
+                          self.log("   >> Escribe el correo en el campo y pulsa ENVIAR CODIGO.")
+                      else:
+                          self.log("   >> Esperando codigo de verificacion...")
                       self.code_event.wait(600)
                       self.code_event.clear()
                       return self.code_value.get().strip()
 
                   def on_fila(email, usuario, estado):
-                      self.tv.insert("", "end", values=(email, usuario, estado))
+                      self.q.put(("ROW", email, usuario, estado))
+
+                  def on_mail(addr):
+                      self.q.put(("MAIL", addr))
 
                   def job():
                       try:
                           run_creacion(plat, modo, max(1, cfg["cantidad"]), lista, self.log,
-                                       self.stop_flag, pausa_captcha, pedir_codigo, on_fila)
+                                       self.stop_flag, pausa_captcha, pedir_codigo,
+                                       on_fila, on_mail)
                       except Exception:
                           self.log("ERROR: " + traceback.format_exc(limit=3))
 
@@ -1326,12 +1364,12 @@ jobs:
           pip install selenium pyinstaller
 
       - name: Compilar EXE
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name SocialBoost --collect-all selenium --hidden-import selenium.webdriver.chrome.service app.py
+
+      - name: Verificar que el EXE existe
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed ^
-            --name SocialBoost ^
-            --collect-all selenium ^
-            --hidden-import selenium.webdriver.chrome.service ^
-            app.py
+          if (!(Test-Path dist\SocialBoost.exe)) { throw "No se genero el ejecutable" }
+          Get-Item dist\SocialBoost.exe | Select-Object Name, Length
 
       - name: Subir artefacto
         uses: actions/upload-artifact@v4
